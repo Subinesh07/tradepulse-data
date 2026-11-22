@@ -638,13 +638,13 @@ def horizon_plan(hz, t, f):
     elif hz == '3M':
         sl = min(px - 3.5 * atr, (t['d50'] or px) * 0.97); tg = px + (px - sl) * 2
     else:
-        sl = max(min((t['d200'] or px * 0.85) * 0.95, px * 0.88), px * 0.75)
+        sl = max(min((t['d200'] or px * 0.85) * 0.95, px * 0.9), px * 0.82)
         g = (f or {}).get('profit3') or 12
-        g = clamp(g, 8, 30) / 100
+        g = clamp(g, 6, 25) / 100
         yrs = {'6M': 0.5, '1Y': 1, '>1Y': 3}[hz]
         rer = 1.0
         if f and f.get('pe') and f.get('pe_med3') and f['pe'] > 0:
-            rer = clamp(f['pe_med3'] / f['pe'], 0.75, 1.3) ** (min(yrs, 1))
+            rer = clamp(f['pe_med3'] / f['pe'], 0.8, 1.15) ** (min(yrs, 1))
         tg = px * ((1 + g) ** yrs) * rer
     return rd(sl, 2), rd(tg, 2)
 
