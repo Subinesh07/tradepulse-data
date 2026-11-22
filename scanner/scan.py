@@ -105,7 +105,7 @@ def get_universe():
         r = http('https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv', session=sess)
         df = pd.read_csv(io.StringIO(r.text))
         df.columns = [c.strip() for c in df.columns]
-        df = df[df['SERIES'].astype(str).str.strip() == 'EQ']
+        df = df[df['SERIES'].astype(str).str.strip().isin(['EQ', 'BE', 'BZ'])]
         for _, row in df.iterrows():
             s = str(row['SYMBOL']).strip()
             uni.append({'s': s, 'n': str(row['NAME OF COMPANY']).strip().title(), 'sec': sectors.get(s, ('', ''))[0]})
@@ -288,7 +288,7 @@ def fetch_fund(sym, px_df):
 
     last = lambda s: float(s.iloc[-1]) if s is not None and len(s) else None
     f = {
-        'mcap': info.get('marketCap'), 'pe': info.get('trailingPE'), 'pb': info.get('priceToBook'),
+        'mcap': info.get('marketCap') or ((info.get('sharesOutstanding') or 0) * float(px_df['Close'].iloc[-1]) if (info.get('sharesOutstanding') and px_df is not None) else None), 'pe': info.get('trailingPE'), 'pb': info.get('priceToBook'),
         'roe': (info.get('returnOnEquity') or 0) * 100 if info.get('returnOnEquity') is not None else None,
         'de': (info.get('debtToEquity') / 100) if info.get('debtToEquity') is not None else None,
         'cr': info.get('currentRatio'), 'div': info.get('dividendYield'), 'beta': info.get('beta'),
@@ -697,7 +697,15 @@ THEMES = [
 
 def fred(series_id):
     try:
-        r = http(f'https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}', timeout=30)
+        r = None
+        for attempt in range(2):
+            try:
+                r = http(f'https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}&cosd={(NOW.date() - dt.timedelta(days=400)).isoformat()}', timeout=75)
+                break
+            except Exception as e:
+                if attempt:
+                    raise
+                time.sleep(5)
         df = pd.read_csv(io.StringIO(r.text))
         df.columns = ['d', 'v']
         df['v'] = pd.to_numeric(df['v'], errors='coerce')
@@ -744,6 +752,13 @@ def build_themes(prices, demo=False):
                 heat = clamp(50 + np.mean(vs) * 2 + (np.mean(y1) * 0.25 if y1 else 0))
             if th['id'] == 'rates':
                 notes = []
+                if fr.get('SOFR') is None:  # NY Fed fallback for SOFR
+                    try:
+                        j = http('https://markets.newyorkfed.org/api/rates/secured/sofr/last/1.json').json()
+                        fr['SOFR'] = pd.DataFrame({'d': [j['refRates'][0]['effectiveDate']], 'v': [float(j['refRates'][0]['percentRate'])]})
+                        g.append({'k': 'SOFR (overnight repo rate, %)', 'v': rd(fr['SOFR']['v'].iloc[-1], 2), 'note': 'Source: New York Fed'})
+                    except Exception as e2:
+                        log('WARN nyfed', e2)
                 if fr.get('SOFR') is not None and fr.get('IORB') is not None and len(fr['SOFR']) and len(fr['IORB']):
                     spread = (fr['SOFR']['v'].iloc[-1] - fr['IORB']['v'].iloc[-1]) * 100
                     g.append({'k': 'SOFR − IORB (repo stress, bp)', 'v': rd(spread, 1), 'note': 'Above 0 = repo funding stress'})
@@ -834,7 +849,6 @@ CHANNELS = [  # name, handle or channel id, language
     ('Pranjal Kamra (Finology)', '@PranjalKamra', 'en'),
     ('Akshat Shrivastava', '@AkshatZayn', 'en'),
     ('SOIC', '@SOIC', 'en'),
-    ('FinnovationZ', '@FinnovationZ', 'en'),
     ('Asset Yogi', '@AssetYogi', 'en'),
     ('Markets by Zerodha', '@marketsbyzerodha', 'en'),
 ]
@@ -880,13 +894,21 @@ def build_buzz(uni, tech_map, lt_map, demo=False):
         vids = [{'ch': 'Money Pechu (Anand Srinivasan)', 't': 'தங்கம் விலை இன்னும் உயருமா? Gold, TBZ, Titan analysis', 'id': 'demo', 'd': NOW.date().isoformat()},
                 {'ch': 'CA Rachana Ranade', 't': 'Is the AI bubble about to burst? What it means for Indian IT stocks', 'id': 'demo', 'd': NOW.date().isoformat()}]
     # mentions: match NSE symbols and distinctive company names
-    names = {}
+    STOP_SYM = {'GOLD', 'IT', 'AI', 'IPO', 'NSE', 'SIP', 'ETF', 'USA', 'RBI', 'GDP', 'TV', 'EMI', 'NRI', 'PSU', 'FII', 'DII', 'BANK', 'TAX', 'GST', 'CEO', 'LIVE', 'NEWS', 'WAR', 'BEST', 'TOP', 'NEW', 'OIL', 'SBI'}
+    STOP_W = {'anand', 'srinivasan', 'gandhi', 'silver', 'golden', 'money', 'market', 'markets', 'stock', 'stocks', 'share', 'shares', 'bharat', 'tamil', 'nifty', 'india', 'indian',
+              'legend', 'legends', 'success', 'future', 'global', 'world', 'great', 'super', 'smart', 'power', 'energy', 'capital', 'finance', 'royal', 'prime', 'sunday', 'national', 'metal', 'universal'}
+    phrase, single, sym_ok = {}, {}, {}
     for u in uni:
         s = u['s']
-        names[s] = s
-        first = re.sub(r'\b(limited|ltd|india|industries|the|company|corporation|of)\b', '', u['n'].lower()).strip().split()
-        if first and len(first[0]) >= 5:
-            names[first[0]] = s
+        if s not in STOP_SYM and len(s) >= 3:
+            sym_ok[s] = s
+        w = [x for x in re.sub(r'\b(limited|ltd|india|industries|the|company|corporation|of|and)\b|[^a-z ]', ' ', u['n'].lower()).split() if len(x) > 1]
+        if len(w) >= 2:
+            phrase[w[0] + ' ' + w[1]] = s
+        tv = (tech_map.get(s) or {}).get('traded', 0)
+        if w and len(w[0]) >= 5 and w[0] not in STOP_W and tv >= 5e8:  # single-word names only for big, liquid companies
+            single[w[0]] = s
+    names = sym_ok
     cutoff = (NOW.date() - dt.timedelta(days=21)).isoformat()
     cnt, themes = {}, {k: 0 for k in BUZZ_THEMES}
     for v in vids:
@@ -898,9 +920,13 @@ def build_buzz(uni, tech_map, lt_map, demo=False):
                 themes[k] += 1
         found = set()
         for tok in re.findall(r'[A-Za-z&]{3,}', v['t']):
-            key = tok if tok.isupper() and tok in names else tok.lower()
-            if key in names and (tok.isupper() or len(tok) >= 5):
-                found.add(names[key])
+            if tok.isupper() and tok in sym_ok:
+                found.add(sym_ok[tok])
+            elif tok.lower() in single:
+                found.add(single[tok.lower()])
+        for ph, s2 in phrase.items():
+            if ph in low:
+                found.add(s2)
         for s in found:
             c = cnt.setdefault(s, {'s': s, 'n': 0, 'ch': set(), 'titles': []})
             c['n'] += 1
@@ -989,7 +1015,7 @@ def main():
         if i % 50 == 0:
             log(f'  fund {i}/{len(todo)} ({time.time() - t0:.0f}s)')
             save('fund_cache.json', fc)
-        if time.time() - t0 > 60 * 75:  # keep the job well under the 6h limit and polite to the data source
+        if time.time() - t0 > 60 * 95:  # keep the job well under the 6h limit and polite to the data source
             log('time budget reached, continuing next run')
             break
     save('fund_cache.json', fc)
@@ -1053,7 +1079,7 @@ def main():
                 'd50': rd(t['d50']), 'd200': rd(t['d200']), 'hi52': rd(t['hi52']), 'lo52': rd(t['lo52']), 'hi3': rd(t['hi3']), 'lo3': rd(t['lo3']),
                 'rsi': rd(t['rsi'], 0), 'vol': rd(t['vol'], 0), 'dd': rd(t['dd'], 0), 'atrp': rd(t['atrp'], 2), 'tv': rd(t['traded'] / 1e7, 2), 'rs': rd(rs_pct.get(s, 50), 0),
                 'hz': hz, 'ckS': ck['score'] if ck else None, 'lynch': ck['lynch'] if ck else None, 'nfl': len(ck['flags']) if ck else None,
-                'mb': mb if f else None, 'res': (f or {}).get('res'), 'mcap': rd(((f or {}).get('mcap') or 0) / 1e7, 0) if f else None,
+                'mb': mb if f else None, 'res': (f or {}).get('res'), 'mcap': rd(f['mcap'] / 1e7, 0) if (f and f.get('mcap')) else None,
                 'pe': (f or {}).get('pe'), 'beta': (f or {}).get('beta'),
                 '_d': {'sp': t['spark'], 'why': why, 'risk': risk, 'plan': plan, 'S': {k: rd(v, 0) for k, v in S.items()}, 'f': fl, 'ck': ck, 'mbw': mbw},
             })
@@ -1074,7 +1100,7 @@ def main():
         n = series_stats(nifty)
         above = np.mean([1 if (t['d200'] and t['px'] > t['d200']) else 0 for t in T.values()]) * 100
         regime = {'nifty': rd(n['px']), 'nifty_vs200': rd(n['vs200'], 1), 'nifty_y1': rd(n['y1'], 1), 'breadth': rd(above, 0),
-                  'mood': 'bull' if above >= 60 and n['vs200'] > 0 else 'bear' if above < 40 else 'mixed'}
+                  'mood': 'bull' if above >= 60 and n['vs200'] > 0 else 'narrow' if (above < 45 and n['vs200'] > 0) else 'bear' if above < 40 else 'mixed'}
     except Exception as e:
         log('WARN regime', e)
 
